@@ -1,0 +1,12 @@
+# Verified versions (2026-05-29). Python 3.11.
+gymnasium[mujoco]==1.2.3
+mujoco==3.9.0
+stable-baselines3==2.8.0
+numpy==2.4.4
+tensorboard==2.20.0
+imageio==2.37.3          # used by enjoy.py --video
+
+# PyTorch: install the build matching the target machine's CUDA (or CPU).
+# This repo was tested on torch 2.11.0+cu128. On a new machine, prefer:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128   (or cpu / your CUDA)
+torch>=2.4
