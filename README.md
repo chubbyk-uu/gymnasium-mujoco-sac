@@ -4,7 +4,7 @@
 
 ## 环境
 
-- gymnasium 1.2.3 / mujoco 3.9.0 / stable-baselines3 2.8.0 / torch 2.11 (CUDA 12.8)
+- gymnasium 1.2.3 / mujoco 3.9.0 / stable-baselines3 2.7.1 / torch 2.10.0+cu128 / numpy 2.3.5
 - 渲染走 WSLg 窗口（`DISPLAY=:0`）
 
 ## 训练

@@ -21,6 +21,9 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import tempfile
+
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "matplotlib"))
 
 import numpy as np
 import gymnasium as gym

@@ -19,18 +19,19 @@ from __future__ import annotations
 
 import argparse
 import os
+import tempfile
 from datetime import datetime
 
-import numpy as np
-import torch
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "matplotlib"))
 
 import gymnasium as gym
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import (
     CheckpointCallback,
     EvalCallback,
+    StopTrainingOnNoModelImprovement,
+    StopTrainingOnRewardThreshold,
 )
-from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
 
@@ -47,6 +48,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run-name", type=str, default=None,
                    help="Override the auto-generated run directory name.")
     p.add_argument("--log-root", type=str, default="runs")
+
+    # --- resume ---
+    p.add_argument("--resume", type=str, default=None,
+                   help="Path to a saved .zip model to resume from (e.g. "
+                        "runs/HalfCheetah-v5_sac_0/final_model.zip). Continues the "
+                        "step counter. If a matching *_replay_buffer.pkl exists next "
+                        "to it, the replay buffer is restored too (seamless resume); "
+                        "otherwise it warm-starts from the weights and refills the buffer.")
+    p.add_argument("--save-replay-buffer", action="store_true",
+                   help="Also save the replay buffer in checkpoints / final model so a "
+                        "future --resume can be fully seamless. Files are large (~GBs).")
 
     # --- SAC hyperparameters (zoo defaults that work well across MuJoCo) ---
     p.add_argument("--learning-rate", type=float, default=3e-4)
@@ -66,6 +78,16 @@ def parse_args() -> argparse.Namespace:
                    help="Env steps between evaluations.")
     p.add_argument("--n-eval-episodes", type=int, default=10)
     p.add_argument("--checkpoint-freq", type=int, default=100_000)
+
+    # --- early stopping (optional; off by default) ---
+    p.add_argument("--stop-no-improve", type=int, default=None,
+                   help="Stop if the best eval reward does not improve for this many "
+                        "consecutive evals (env-agnostic, recommended). Use a generous "
+                        "value (e.g. 15-20) for envs with early termination that "
+                        "oscillate (Hopper/Walker2d/Ant), or they may stop in a dip.")
+    p.add_argument("--stop-reward", type=float, default=None,
+                   help="Stop as soon as the mean eval reward reaches this threshold "
+                        "(needs a per-env target; checked only on a new best).")
     return p.parse_args()
 
 
@@ -99,26 +121,62 @@ def main() -> None:
 
     policy_kwargs = dict(net_arch=list(args.net_arch))
 
-    model = SAC(
-        policy="MlpPolicy",
-        env=train_env,
-        learning_rate=args.learning_rate,
-        buffer_size=args.buffer_size,
-        batch_size=args.batch_size,
-        gamma=args.gamma,
-        tau=args.tau,
-        learning_starts=args.learning_starts,
-        train_freq=args.train_freq,
-        gradient_steps=args.gradient_steps,
-        ent_coef=args.ent_coef,
-        policy_kwargs=policy_kwargs,
-        tensorboard_log=tb_dir,
-        device=args.device,
-        seed=args.seed,
-        verbose=1,
-    )
+    if args.resume:
+        # Resume: load weights (and optimizer state) and keep training.
+        model = SAC.load(
+            args.resume,
+            env=train_env,
+            tensorboard_log=tb_dir,
+            device=args.device,
+        )
+        # Try to restore the replay buffer for a seamless resume; SB3 saves it
+        # next to the model as "<name>_replay_buffer.pkl".
+        buf_path = args.resume[:-4] if args.resume.endswith(".zip") else args.resume
+        buf_path += "_replay_buffer.pkl"
+        if os.path.exists(buf_path):
+            model.load_replay_buffer(buf_path)
+            print(f"[info] resumed WITH replay buffer ({model.replay_buffer.size()} "
+                  f"transitions) from {args.resume}")
+        else:
+            print(f"[info] resumed from weights only (no replay buffer at {buf_path}); "
+                  f"buffer will refill — expect a brief dip before recovery.")
+    else:
+        model = SAC(
+            policy="MlpPolicy",
+            env=train_env,
+            learning_rate=args.learning_rate,
+            buffer_size=args.buffer_size,
+            batch_size=args.batch_size,
+            gamma=args.gamma,
+            tau=args.tau,
+            learning_starts=args.learning_starts,
+            train_freq=args.train_freq,
+            gradient_steps=args.gradient_steps,
+            ent_coef=args.ent_coef,
+            policy_kwargs=policy_kwargs,
+            tensorboard_log=tb_dir,
+            device=args.device,
+            seed=args.seed,
+            verbose=1,
+        )
 
-    print(f"[info] env={args.env}  device={model.device}  run_dir={run_dir}")
+    print(f"[info] env={args.env}  device={model.device}  run_dir={run_dir}"
+          f"{'  (resumed)' if args.resume else ''}")
+
+    # Optional early stopping, wired into the eval callback.
+    #   --stop-no-improve N -> StopTrainingOnNoModelImprovement (after each eval)
+    #   --stop-reward R     -> StopTrainingOnRewardThreshold   (on each new best)
+    on_new_best = None
+    after_eval = None
+    if args.stop_reward is not None:
+        on_new_best = StopTrainingOnRewardThreshold(
+            reward_threshold=args.stop_reward, verbose=1)
+        print(f"[info] early stop: when eval reward >= {args.stop_reward}")
+    if args.stop_no_improve is not None:
+        after_eval = StopTrainingOnNoModelImprovement(
+            max_no_improvement_evals=args.stop_no_improve,
+            min_evals=args.stop_no_improve, verbose=1)
+        print(f"[info] early stop: after {args.stop_no_improve} evals with no new best")
 
     # Save the best model (by mean eval reward) and periodic checkpoints.
     eval_cb = EvalCallback(
@@ -129,26 +187,45 @@ def main() -> None:
         n_eval_episodes=args.n_eval_episodes,
         deterministic=True,
         render=False,
+        callback_on_new_best=on_new_best,
+        callback_after_eval=after_eval,
     )
     ckpt_cb = CheckpointCallback(
         save_freq=args.checkpoint_freq,
         save_path=ckpt_dir,
         name_prefix="sac",
-        save_replay_buffer=False,     # replay buffers are huge; flip on if you need resume
+        save_replay_buffer=args.save_replay_buffer,  # large; enable for seamless resume
     )
+
+    # --total-timesteps is always the *target total* step count. On resume we only
+    # run the remaining steps and keep counting from where we left off.
+    if args.resume:
+        learn_steps = args.total_timesteps - model.num_timesteps
+        if learn_steps <= 0:
+            raise SystemExit(
+                f"[error] already at {model.num_timesteps} steps >= target "
+                f"{args.total_timesteps}; raise --total-timesteps to continue.")
+        print(f"[info] resuming at {model.num_timesteps} steps; "
+              f"running {learn_steps} more to reach {args.total_timesteps}.")
+    else:
+        learn_steps = args.total_timesteps
 
     started = datetime.now()
     try:
         model.learn(
-            total_timesteps=args.total_timesteps,
+            total_timesteps=learn_steps,
             callback=[eval_cb, ckpt_cb],
             tb_log_name="SAC",
             progress_bar=True,
+            reset_num_timesteps=not bool(args.resume),
         )
     finally:
         # Always save the final model, even on Ctrl-C, so the run isn't wasted.
         final_path = os.path.join(run_dir, "final_model")
         model.save(final_path)
+        if args.save_replay_buffer:
+            model.save_replay_buffer(final_path + "_replay_buffer.pkl")
+            print(f"[info] replay buffer saved to {final_path}_replay_buffer.pkl")
         print(f"[info] final model saved to {final_path}.zip")
         print(f"[info] best model (by eval reward) in {best_dir}/best_model.zip")
         print(f"[info] wall time: {datetime.now() - started}")
