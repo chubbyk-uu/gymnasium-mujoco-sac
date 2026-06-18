@@ -4,8 +4,18 @@
 
 ## 环境
 
-- gymnasium 1.2.3 / mujoco 3.9.0 / stable-baselines3 2.7.1 / torch 2.10.0+cu128 / numpy 2.3.5
+- Python 3.12.13
+- gymnasium 1.3.0 / mujoco 3.9.0 / stable-baselines3 2.9.0 / torch 2.12.0+cu130 / numpy 2.4.6
+- tensorboard 2.20.0 / imageio 2.37.3（仅 `enjoy.py --video` 录 mp4 需要）
 - 渲染走 WSLg 窗口（`DISPLAY=:0`）
+
+安装：
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+PyTorch 的 CUDA/CPU wheel 需要按机器选择；本环境使用 `torch 2.12.0+cu130`。
 
 ## 训练
 
@@ -18,6 +28,7 @@ python train_sac.py --env Hopper-v5
 
 # MuJoCo 网络小，CPU 有时比 GPU 快，可对比：
 python train_sac.py --device cpu
+python train_sac.py --device cuda
 ```
 
 产物放在 `runs/<env>_sac_<seed>/`：
